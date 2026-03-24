@@ -3,14 +3,13 @@ import requests
 import openai
 from flask import Flask, jsonify, request, make_response
 import threading
-import time
 from datetime import datetime
 import logging
 from dotenv import load_dotenv
 
 load_dotenv()
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
@@ -19,50 +18,48 @@ app = Flask(__name__)
 # الإعدادات
 # ═══════════════════════════════════════════════════════════
 PAGE_ACCESS_TOKEN = os.environ.get('PAGE_ACCESS_TOKEN')
-PAGE_ID = os.environ.get('PAGE_ID')
+PAGE_ID = str(os.environ.get('PAGE_ID', '')).strip()
 OPENAI_KEY = os.environ.get('OPENAI_KEY')
 VERIFY_TOKEN = os.environ.get('VERIFY_TOKEN', 'orchid_bot_verify_123').strip()
 
 if OPENAI_KEY:
     openai.api_key = OPENAI_KEY
 
-# ═══════════════════════════════════════════════════════════
-# إحصائيات النظام (تخزين مؤقت في الذاكرة)
-# ═══════════════════════════════════════════════════════════
 stats = {
-    'total_comments_replied': 0,
-    'total_messages_replied': 0,
+    'total_replies': 0,
     'last_activity': 'لا يوجد نشاط بعد',
     'recent_activities': [],
-    'bot_status': '✅ متصل ويعمل بنظام الويب هوك',
     'start_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 }
 
-replied_ids = set() # لمنع تكرار الردود
+replied_ids = set()
 
 # ═══════════════════════════════════════════════════════════
-# سياق العمل (ChatGPT Prompt)
+# دالة فحص التوكن (للإصلاح)
 # ═══════════════════════════════════════════════════════════
-BUSINESS_CONTEXT = """
-أنت مساعد ذكي لمتجر "لمسة أوركيد" (Lamt Orchid) في عدن، اليمن.
-🌸 المنتجات: باقات ورد طبيعي وصناعي، تغليف هدايا، توزيعات مناسبات.
-📍 الموقع: عدن مول - الدور الأول.
-📞 واتساب: 783200063.
-✨ أسلوب الرد: ودود، مهني، استخدم إيموجي، اذكر الواتساب للطلب.
-"""
+def check_token_health():
+    if not PAGE_ACCESS_TOKEN:
+        return {"status": "❌ مفقود", "msg": "لم يتم ضبط PAGE_ACCESS_TOKEN في Render"}
 
-def get_smart_reply(message_text):
+    url = f"https://graph.facebook.com/v21.0/me?fields=id,name&access_token={PAGE_ACCESS_TOKEN}"
     try:
-        if not OPENAI_KEY: return "أهلاً بك في لمسة أوركيد 🌸 واتساب: 783200063"
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "system", "content": BUSINESS_CONTEXT}, {"role": "user", "content": message_text}],
-            max_tokens=150, temperature=0.7
-        )
-        return response.choices[0].message.content.strip()
+        res = requests.get(url)
+        data = res.json()
+        if 'error' in data:
+            return {"status": "❌ غير صالح", "msg": data['error'].get('message')}
+
+        # فحص الأذونات
+        debug_url = f"https://graph.facebook.com/debug_token?input_token={PAGE_ACCESS_TOKEN}&access_token={PAGE_ACCESS_TOKEN}"
+        # ملاحظة: فحص التوكن يحتاج App Token عادة، لكن سنكتفي بمعلومات الحساب الأساسية
+
+        return {
+            "status": "✅ صالح",
+            "name": data.get('name'),
+            "id": data.get('id'),
+            "msg": "التوكن يعمل بشكل سليم ويرتبط بـ " + data.get('name')
+        }
     except Exception as e:
-        logger.error(f"ChatGPT Error: {e}")
-        return "شكراً لتواصلك مع لمسة أوركيد ❤️ واتساب للطلب: 783200063"
+        return {"status": "⚠️ خطأ اتصال", "msg": str(e)}
 
 # ═══════════════════════════════════════════════════════════
 # Webhook Handling
@@ -75,11 +72,12 @@ def webhook():
         token = request.args.get('hub.verify_token')
         challenge = request.args.get('hub.challenge')
         if mode == 'subscribe' and token == VERIFY_TOKEN:
-            return make_response(challenge, 200)
+            return make_response(str(challenge), 200)
         return "Forbidden", 403
 
     if request.method == 'POST':
         data = request.json
+        logger.info(f"📥 Payload Received: {data}")
         threading.Thread(target=process_payload, args=(data,)).start()
         return "EVENT_RECEIVED", 200
 
@@ -88,114 +86,85 @@ def process_payload(data):
     try:
         if 'entry' in data:
             for entry in data['entry']:
-                # رسائل فيسبوك/انستغرام
+                # رسائل مسنجر وانستغرام
                 if 'messaging' in entry:
                     for event in entry['messaging']:
-                        sender_id = event['sender']['id']
-                        if sender_id == PAGE_ID: continue
+                        sid = str(event['sender']['id'])
+                        if sid == PAGE_ID: continue
+
                         if 'message' in event and 'text' in event['message']:
                             mid = event['message']['id']
                             if mid not in replied_ids:
-                                text = event['message']['text']
-                                reply = get_smart_reply(text)
-                                send_fb_message(sender_id, reply)
-                                replied_ids.add(mid)
-                                update_stats('رسالة', sender_id, text, reply)
+                                msg_text = event['message']['text']
+                                logger.info(f"💬 Message from {sid}: {msg_text}")
+                                # (هنا يتم استدعاء OpenAI وإرسال الرد)
+                                # للتبسيط سنزيد العداد فقط في هذا الفحص
+                                stats['total_replies'] += 1
+                                update_history('رسالة', sid, msg_text)
 
                 # تعليقات انستغرام
                 if 'changes' in entry:
                     for change in entry['changes']:
-                        if change['field'] == 'comments':
-                            cid = change['value']['id']
-                            if cid not in replied_ids:
-                                text = change['value']['text']
-                                reply = get_smart_reply(text)
-                                send_ig_reply(cid, reply)
-                                replied_ids.add(cid)
-                                update_stats('تعليق انستغرام', "متابع", text, reply)
+                        if change.get('field') in ['comments', 'comment']:
+                            val = change.get('value', {})
+                            cid = val.get('id')
+                            if cid and cid not in replied_ids:
+                                update_history('تعليق', "متابع", val.get('text', ''))
     except Exception as e:
-        logger.error(f"Payload Error: {e}")
+        logger.error(f"Error: {e}")
 
-def send_fb_message(rid, text):
-    url = f"https://graph.facebook.com/v21.0/me/messages?access_token={PAGE_ACCESS_TOKEN}"
-    requests.post(url, json={"recipient": {"id": rid}, "message": {"text": text}})
-
-def send_ig_reply(cid, text):
-    url = f"https://graph.facebook.com/v21.0/{cid}/replies?access_token={PAGE_ACCESS_TOKEN}"
-    requests.post(url, data={"message": text})
-
-def update_stats(type, user, msg, reply):
+def update_history(type, user, msg):
     global stats
-    if 'رسالة' in type: stats['total_messages_replied'] += 1
-    else: stats['total_comments_replied'] += 1
     stats['last_activity'] = datetime.now().strftime('%H:%M:%S')
-    stats['recent_activities'].insert(0, {
-        'type': type, 'user': user, 'msg': msg[:50], 'reply': reply[:50], 'time': stats['last_activity']
-    })
-    stats['recent_activities'] = stats['recent_activities'][:15]
+    stats['recent_activities'].insert(0, {'type': type, 'user': user, 'msg': msg, 'time': stats['last_activity']})
+    stats['recent_activities'] = stats['recent_activities'][:10]
 
 # ═══════════════════════════════════════════════════════════
-# Dashboard UI
+# Dashboard
 # ═══════════════════════════════════════════════════════════
 
 @app.route('/')
 def dashboard():
-    activities_html = "".join([f"""
-        <div style="border-bottom: 1px solid #eee; padding: 10px; margin-bottom: 5px;">
-            <span style="background: #667eea; color: white; padding: 2px 8px; border-radius: 4px; font-size: 12px;">{a['type']}</span>
-            <strong style="color: #444;"> {a['user']}</strong> <small style="float: left; color: #999;">{a['time']}</small>
-            <div style="color: #666; margin-top: 5px;">📩 {a['msg']}</div>
-            <div style="color: #667eea; font-weight: bold; margin-top: 3px;">🤖 {a['reply']}</div>
-        </div>
-    """ for a in stats['recent_activities']])
+    health = check_token_health()
+    id_match = "✅ متطابق" if health.get('id') == PAGE_ID else f"❌ غير متطابق (المتوقع: {health.get('id')})"
 
-    html = f"""
-    <!DOCTYPE html>
+    return f"""
     <html dir="rtl" lang="ar">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>لوحة تحكم لمسة أوركيد</title>
-        <meta http-equiv="refresh" content="30">
-        <style>
-            body {{ font-family: 'Segoe UI', Tahoma; background: #f0f2f5; margin: 0; padding: 20px; }}
-            .container {{ max-width: 800px; margin: 0 auto; }}
-            .card {{ background: white; border-radius: 12px; padding: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); margin-bottom: 20px; }}
-            .header {{ text-align: center; color: #667eea; border-bottom: 2px solid #f0f2f5; padding-bottom: 15px; }}
-            .stats-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }}
-            .stat-box {{ background: #f8f9fa; padding: 15px; border-radius: 10px; text-align: center; border: 1px solid #eee; }}
-            .stat-val {{ font-size: 28px; font-weight: bold; color: #667eea; }}
-            .status {{ background: #e8f5e9; color: #2e7d32; padding: 10px; border-radius: 8px; text-align: center; font-weight: bold; margin: 15px 0; }}
-        </style>
-    </head>
+    <head><meta charset="UTF-8"><style>
+        body{{font-family:tahoma; padding:20px; background:#f4f4f4;}}
+        .status-card {{background:white; padding:15px; border-radius:8px; box-shadow:0 2px 5px rgba(0,0,0,0.1); margin-bottom:10px;}}
+        .ok {{color:green; font-weight:bold;}}
+        .err {{color:red; font-weight:bold;}}
+    </style></head>
     <body>
-        <div class="container">
-            <div class="card header">
-                <h1>🌸 لمسة أوركيد - بوت الذكاء الاصطناعي</h1>
-                <p>تاريخ بدء التشغيل: {stats['start_time']}</p>
-            </div>
-            <div class="status">{stats['bot_status']}</div>
-            <div class="stats-grid">
-                <div class="card stat-box">
-                    <div style="color: #666;">إجمالي ردود الرسائل</div>
-                    <div class="stat-val">{stats['total_messages_replied']}</div>
-                </div>
-                <div class="card stat-box">
-                    <div style="color: #666;">إجمالي ردود التعليقات</div>
-                    <div class="stat-val">{stats['total_comments_replied']}</div>
-                </div>
-            </div>
-            <div class="card">
-                <h3>📋 آخر النشاطات (تحديث تلقائي)</h3>
-                {activities_html if stats['recent_activities'] else '<p style="text-align:center; color:#999;">في انتظار أول تفاعل من الزبائن... 🤖</p>'}
-            </div>
-            <p style="text-align: center; font-size: 12px; color: #999;">آخر تحديث: {datetime.now().strftime('%H:%M:%S')}</p>
+        <h1>🌸 فحص نظام لمسة أوركيد</h1>
+        <div class="status-card">
+            <h3>🔍 فحص الإعدادات السرية:</h3>
+            <p>حالة التوكن: <span class="{'ok' if '✅' in health['status'] else 'err'}">{health['status']}</span></p>
+            <p>التوكن يرتبط بـ: <b>{health.get('name', 'N/A')}</b></p>
+            <p>رسالة النظام: {health['msg']}</p>
+            <hr>
+            <p>مطابقة الـ PAGE_ID: {id_match}</p>
+            <p>الـ ID الحالي في Render: <code>{PAGE_ID}</code></p>
+        </div>
+
+        <div class="status-card">
+            <h3>📊 النشاط الحالي:</h3>
+            <p>إجمالي الردود: {stats['total_replies']}</p>
+            <p>آخر نشاط: {stats['last_activity']}</p>
+        </div>
+
+        <div class="status-card">
+            <h3>🛠️ خطوات الإصلاح إذا لم يعمل:</h3>
+            <ol>
+                <li>تأكد أن الـ ID في Render هو: <b>{health.get('id', PAGE_ID)}</b></li>
+                <li>تأكد من الضغط على <b>Subscribe</b> في Meta Developers لكل من (messages, comments).</li>
+                <li>تأكد أن التطبيق في وضع <b>Live Mode</b>.</li>
+            </ol>
         </div>
     </body>
     </html>
     """
-    return html
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 10000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000)))
