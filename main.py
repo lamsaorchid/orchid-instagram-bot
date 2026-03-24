@@ -33,10 +33,11 @@ stats = {
     'recent_activities': [],
     'start_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
     'bot_running': True,
-    'fb_page_name': 'جاري التحقق...',
-    'ig_username': 'جاري التحقق...',
+    'fb_page_name': '---',
+    'ig_username': '---',
     'openai_status': '⏳ جاري الفحص...',
-    'meta_status': '⏳ جاري الفحص...'
+    'meta_status': '⏳ جاري الفحص...',
+    'meta_error_detail': ''
 }
 
 replied_ids = set()
@@ -68,32 +69,46 @@ def get_smart_reply(message_text):
 
 def check_connections():
     global stats
+    # فحص OpenAI
     try:
-        openai.Model.list()
-        stats['openai_status'] = '✅ متصل'
+        if not OPENAI_KEY:
+            stats['openai_status'] = '❌ مفتاح مفقود'
+        else:
+            openai.Model.list()
+            stats['openai_status'] = '✅ متصل'
     except Exception as e:
         stats['openai_status'] = '❌ خطأ'
         logger.error(f"OpenAI Error: {e}")
+
+    # فحص Meta
+    if not PAGE_ACCESS_TOKEN:
+        stats['meta_status'] = '❌ توكن مفقود'
+        return
 
     try:
         url = f"https://graph.facebook.com/v21.0/me"
         params = {'fields': 'name,instagram_business_account', 'access_token': PAGE_ACCESS_TOKEN}
         res = requests.get(url, params=params).json()
+
         if 'name' in res:
             stats['fb_page_name'] = res['name']
             stats['meta_status'] = '✅ متصل'
+            stats['meta_error_detail'] = ''
             if 'instagram_business_account' in res:
                 ig_id = res['instagram_business_account']['id']
                 ig_url = f"https://graph.facebook.com/v21.0/{ig_id}"
                 ig_res = requests.get(ig_url, params={'fields': 'username', 'access_token': PAGE_ACCESS_TOKEN}).json()
                 stats['ig_username'] = ig_res.get('username', 'غير مرتبط')
             else:
-                stats['ig_username'] = '❌ غير مرتبط'
-        else:
+                stats['ig_username'] = '❌ لا يوجد حساب انستغرام مرتبط'
+        elif 'error' in res:
             stats['meta_status'] = '❌ توكن خطأ'
+            stats['meta_error_detail'] = res['error'].get('message', 'خطأ غير معروف')
+            logger.error(f"Meta API Error: {res['error']}")
     except Exception as e:
         stats['meta_status'] = '❌ خطأ اتصال'
-        logger.error(f"Meta Error: {e}")
+        stats['meta_error_detail'] = str(e)
+        logger.error(f"Meta Connection Error: {e}")
 
 # ═══════════════════════════════════════════════════════════
 # وظائف البوت (Polling Mode)
@@ -101,27 +116,29 @@ def check_connections():
 
 def check_updates():
     while True:
-        if stats['bot_running'] and PAGE_ACCESS_TOKEN and PAGE_ID:
+        if stats['bot_running'] and PAGE_ACCESS_TOKEN and PAGE_ID and PAGE_ID != '':
             try:
-                # فحص الرسائل
                 conv_url = f"https://graph.facebook.com/v21.0/{PAGE_ID}/conversations"
                 res = requests.get(conv_url, params={'access_token': PAGE_ACCESS_TOKEN}).json()
-                for conv in res.get('data', []):
-                    conv_id = conv['id']
-                    m_url = f"https://graph.facebook.com/v21.0/{conv_id}/messages"
-                    m_res = requests.get(m_url, params={'fields': 'id,message,from', 'access_token': PAGE_ACCESS_TOKEN}).json()
-                    if m_res.get('data'):
-                        last_msg = m_res['data'][0]
-                        mid = last_msg['id']
-                        if mid not in replied_ids and last_msg['from']['id'] != PAGE_ID:
-                            text = last_msg.get('message', '')
-                            reply = get_smart_reply(text)
-                            send_url = f"https://graph.facebook.com/v21.0/{conv_id}/messages"
-                            requests.post(send_url, json={'message': reply, 'access_token': PAGE_ACCESS_TOKEN})
-                            replied_ids.add(mid)
-                            update_stats('رسالة فيسبوك', last_msg['from']['name'], text, reply)
 
-                # فحص التعليقات (Instagram) يتم هنا أيضاً بنفس الطريقة
+                if 'data' in res:
+                    for conv in res['data']:
+                        conv_id = conv['id']
+                        m_url = f"https://graph.facebook.com/v21.0/{conv_id}/messages"
+                        m_res = requests.get(m_url, params={'fields': 'id,message,from', 'access_token': PAGE_ACCESS_TOKEN}).json()
+
+                        if 'data' in m_res and m_res['data']:
+                            last_msg = m_res['data'][0]
+                            mid = last_msg['id']
+                            sender_id = last_msg['from']['id']
+
+                            if mid not in replied_ids and sender_id != PAGE_ID:
+                                text = last_msg.get('message', '')
+                                reply = get_smart_reply(text)
+                                send_url = f"https://graph.facebook.com/v21.0/{conv_id}/messages"
+                                requests.post(send_url, json={'message': reply, 'access_token': PAGE_ACCESS_TOKEN})
+                                replied_ids.add(mid)
+                                update_stats('رسالة فيسبوك', last_msg['from']['name'], text, reply)
             except Exception as e:
                 logger.error(f"Polling Loop Error: {e}")
         time.sleep(60)
@@ -136,7 +153,7 @@ def update_stats(type, user, msg, reply):
     stats['recent_activities'] = stats['recent_activities'][:10]
 
 # ═══════════════════════════════════════════════════════════
-# Dashboard UI & Controls
+# Dashboard UI
 # ═══════════════════════════════════════════════════════════
 
 @app.route('/toggle_bot')
@@ -179,6 +196,7 @@ def dashboard():
             .status-off {{ border-color: #e74c3c; color: #e74c3c; }}
             .badge {{ background: #e8f5e9; color: #2e7d32; padding: 4px 10px; border-radius: 10px; font-size: 12px; }}
             .err {{ background: #ffebee; color: #c62828; }}
+            .error-box {{ font-size: 11px; color: #e74c3c; margin-top: 5px; background: #fff5f5; padding: 5px; border-radius: 5px; display: {'block' if stats['meta_error_detail'] else 'none'}; }}
         </style>
     </head>
     <body>
@@ -210,6 +228,7 @@ def dashboard():
                     <hr>
                     <p><b>حالة OpenAI:</b> <span class="badge {'err' if '❌' in stats['openai_status'] else ''}">{stats['openai_status']}</span></p>
                     <p><b>حالة Meta:</b> <span class="badge {'err' if '❌' in stats['meta_status'] else ''}">{stats['meta_status']}</span></p>
+                    <div class="error-box">⚠️ {stats['meta_error_detail']}</div>
                 </div>
             </div>
         </div>
