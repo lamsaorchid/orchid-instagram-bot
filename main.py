@@ -1,7 +1,7 @@
 import os
 import requests
 import openai
-from flask import Flask, jsonify, request, make_response
+from flask import Flask, jsonify, request, make_response, redirect, url_for
 import threading
 import time
 from datetime import datetime
@@ -32,7 +32,11 @@ stats = {
     'last_activity': 'لا يوجد نشاط بعد',
     'recent_activities': [],
     'start_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-    'bot_running': True
+    'bot_running': True,
+    'fb_page_name': 'جاري التحقق...',
+    'ig_username': 'جاري التحقق...',
+    'openai_status': '⏳ جاري الفحص...',
+    'meta_status': '⏳ جاري الفحص...'
 }
 
 replied_ids = set()
@@ -59,6 +63,41 @@ def get_smart_reply(message_text):
         return "شكراً لتواصلك مع لمسة أوركيد ❤️ واتساب للطلب: 783200063"
 
 # ═══════════════════════════════════════════════════════════
+# وظائف الفحص والاتصال
+# ═══════════════════════════════════════════════════════════
+
+def check_connections():
+    global stats
+    # فحص OpenAI
+    try:
+        openai.Model.list()
+        stats['openai_status'] = '✅ متصل'
+    except Exception as e:
+        stats['openai_status'] = '❌ خطأ في الاتصال'
+        logger.error(f"OpenAI Connection Error: {e}")
+
+    # فحص Meta وجلب بيانات الصفحة
+    try:
+        url = f"https://graph.facebook.com/v21.0/me"
+        params = {'fields': 'name,instagram_business_account', 'access_token': PAGE_ACCESS_TOKEN}
+        res = requests.get(url, params=params).json()
+        if 'name' in res:
+            stats['fb_page_name'] = res['name']
+            stats['meta_status'] = '✅ متصل'
+            if 'instagram_business_account' in res:
+                ig_id = res['instagram_business_account']['id']
+                ig_url = f"https://graph.facebook.com/v21.0/{ig_id}"
+                ig_res = requests.get(ig_url, params={'fields': 'username', 'access_token': PAGE_ACCESS_TOKEN}).json()
+                stats['ig_username'] = ig_res.get('username', 'غير مرتبط')
+            else:
+                stats['ig_username'] = '❌ غير مرتبط'
+        else:
+            stats['meta_status'] = '❌ توكن غير صالح'
+    except Exception as e:
+        stats['meta_status'] = '❌ خطأ اتصال'
+        logger.error(f"Meta Connection Error: {e}")
+
+# ═══════════════════════════════════════════════════════════
 # وظائف البوت (Polling Mode)
 # ═══════════════════════════════════════════════════════════
 
@@ -74,47 +113,47 @@ def get_instagram_account():
     return None
 
 def check_updates():
-    ig_acc_id = get_instagram_account()
     while True:
-        try:
-            # 1. فحص رسائل فيسبوك
-            conv_url = f"https://graph.facebook.com/v21.0/{PAGE_ID}/conversations"
-            res = requests.get(conv_url, params={'access_token': PAGE_ACCESS_TOKEN}).json()
-            for conv in res.get('data', []):
-                conv_id = conv['id']
-                m_url = f"https://graph.facebook.com/v21.0/{conv_id}/messages"
-                m_res = requests.get(m_url, params={'fields': 'id,message,from', 'access_token': PAGE_ACCESS_TOKEN}).json()
-                if m_res.get('data'):
-                    last_msg = m_res['data'][0]
-                    mid = last_msg['id']
-                    if mid not in replied_ids and last_msg['from']['id'] != PAGE_ID:
-                        text = last_msg.get('message', '')
-                        reply = get_smart_reply(text)
-                        send_url = f"https://graph.facebook.com/v21.0/{conv_id}/messages"
-                        requests.post(send_url, json={'message': reply, 'access_token': PAGE_ACCESS_TOKEN})
-                        replied_ids.add(mid)
-                        update_stats('رسالة فيسبوك', last_msg['from']['name'], text, reply)
-
-            # 2. فحص تعليقات انستغرام
-            if ig_acc_id:
-                media_url = f"https://graph.facebook.com/v21.0/{ig_acc_id}/media"
-                res = requests.get(media_url, params={'access_token': PAGE_ACCESS_TOKEN}).json()
-                for post in res.get('data', []):
-                    c_url = f"https://graph.facebook.com/v21.0/{post['id']}/comments"
-                    c_res = requests.get(c_url, params={'fields': 'id,text,from', 'access_token': PAGE_ACCESS_TOKEN}).json()
-                    for comment in c_res.get('data', []):
-                        if comment['id'] not in replied_ids:
-                            text = comment.get('text', '')
+        if stats['bot_running']:
+            ig_acc_id = get_instagram_account()
+            try:
+                # 1. فحص رسائل فيسبوك
+                conv_url = f"https://graph.facebook.com/v21.0/{PAGE_ID}/conversations"
+                res = requests.get(conv_url, params={'access_token': PAGE_ACCESS_TOKEN}).json()
+                for conv in res.get('data', []):
+                    conv_id = conv['id']
+                    m_url = f"https://graph.facebook.com/v21.0/{conv_id}/messages"
+                    m_res = requests.get(m_url, params={'fields': 'id,message,from', 'access_token': PAGE_ACCESS_TOKEN}).json()
+                    if m_res.get('data'):
+                        last_msg = m_res['data'][0]
+                        mid = last_msg['id']
+                        if mid not in replied_ids and last_msg['from']['id'] != PAGE_ID:
+                            text = last_msg.get('message', '')
                             reply = get_smart_reply(text)
-                            r_url = f"https://graph.facebook.com/v21.0/{comment['id']}/replies"
-                            requests.post(r_url, data={'message': reply, 'access_token': PAGE_ACCESS_TOKEN})
-                            replied_ids.add(comment['id'])
-                            update_stats('تعليق انستغرام', comment.get('from',{}).get('username','متابع'), text, reply)
+                            send_url = f"https://graph.facebook.com/v21.0/{conv_id}/messages"
+                            requests.post(send_url, json={'message': reply, 'access_token': PAGE_ACCESS_TOKEN})
+                            replied_ids.add(mid)
+                            update_stats('رسالة فيسبوك', last_msg['from']['name'], text, reply)
 
-            time.sleep(60)
-        except Exception as e:
-            logger.error(f"Polling Error: {e}")
-            time.sleep(30)
+                # 2. فحص تعليقات انستغرام
+                if ig_acc_id:
+                    media_url = f"https://graph.facebook.com/v21.0/{ig_acc_id}/media"
+                    res = requests.get(media_url, params={'access_token': PAGE_ACCESS_TOKEN}).json()
+                    for post in res.get('data', []):
+                        c_url = f"https://graph.facebook.com/v21.0/{post['id']}/comments"
+                        c_res = requests.get(c_url, params={'fields': 'id,text,from', 'access_token': PAGE_ACCESS_TOKEN}).json()
+                        for comment in c_res.get('data', []):
+                            if comment['id'] not in replied_ids:
+                                text = comment.get('text', '')
+                                reply = get_smart_reply(text)
+                                r_url = f"https://graph.facebook.com/v21.0/{comment['id']}/replies"
+                                requests.post(r_url, data={'message': reply, 'access_token': PAGE_ACCESS_TOKEN})
+                                replied_ids.add(comment['id'])
+                                update_stats('تعليق انستغرام', comment.get('from',{}).get('username','متابع'), text, reply)
+            except Exception as e:
+                logger.error(f"Polling Error: {e}")
+
+        time.sleep(60)
 
 def update_stats(type, user, msg, reply):
     global stats
@@ -126,11 +165,22 @@ def update_stats(type, user, msg, reply):
     stats['recent_activities'] = stats['recent_activities'][:20]
 
 # ═══════════════════════════════════════════════════════════
-# Dashboard
+# Dashboard & Control
 # ═══════════════════════════════════════════════════════════
+
+@app.route('/toggle_bot')
+def toggle_bot():
+    stats['bot_running'] = not stats['bot_running']
+    return redirect(url_for('dashboard'))
 
 @app.route('/')
 def dashboard():
+    check_connections()
+
+    bot_status_class = "status-on" if stats['bot_running'] else "status-off"
+    bot_status_text = "يعمل" if stats['bot_running'] else "متوقف"
+    bot_btn_text = "إيقاف البوت" if stats['bot_running'] else "تشغيل البوت"
+
     activities_html = "".join([f"""
         <div class="activity-card">
             <div class="activity-header">
@@ -165,6 +215,8 @@ def dashboard():
                 --secondary: #e91e63;
                 --bg: #f8f9fe;
                 --text: #2d3436;
+                --success: #2ecc71;
+                --danger: #e74c3c;
             }}
             body {{
                 font-family: 'Tajawal', sans-serif;
@@ -264,9 +316,22 @@ def dashboard():
                 display: flex; align-items: center; justify-content: center; margin: 0 auto 15px;
                 font-size: 30px;
             }}
-            .status-on {{ border-color: #2ecc71; color: #2ecc71; }}
-            .info-item {{ display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #f9f9f9; font-size: 14px; }}
+            .status-on {{ border-color: var(--success); color: var(--success); }}
+            .status-off {{ border-color: var(--danger); color: var(--danger); }}
+
+            .btn-toggle {{
+                background: linear-gradient(to right, var(--primary), var(--secondary));
+                color: white; border: none; padding: 12px 30px; border-radius: 30px;
+                font-family: 'Tajawal'; font-weight: bold; cursor: pointer; width: 100%;
+                text-decoration: none; display: inline-block;
+            }}
+            .btn-off {{ background: var(--danger); }}
+
+            .info-item {{ display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #f9f9f9; font-size: 14px; text-align: right; }}
             .info-label {{ color: #95a5a6; }}
+            .status-badge {{ padding: 2px 8px; border-radius: 5px; font-size: 12px; font-weight: bold; }}
+            .status-ok {{ background: #e8f5e9; color: var(--success); }}
+            .status-err {{ background: #ffebee; color: var(--danger); }}
         </style>
     </head>
     <body>
@@ -277,7 +342,7 @@ def dashboard():
                 <div style="font-size: 12px; color: #999; margin-top: 5px;">لوحة تحكم بوت الذكاء الاصطناعي</div>
             </div>
             <div style="background: #f8f9fe; padding: 8px 15px; border-radius: 10px; font-size: 14px;">
-                🟢 البوت يعمل (Polling)
+                🟢 حالة النظام: <span class="status-badge status-ok">متصل</span>
             </div>
         </nav>
 
@@ -310,31 +375,41 @@ def dashboard():
                 <div class="sidebar-card">
                     <h3>🤖 التحكم بالبوت</h3>
                     <div class="bot-status-ui">
-                        <div class="status-circle status-on">✔️</div>
-                        <h4>يعمل</h4>
-                        <p style="font-size: 12px; color: #999;">البوت يقوم بالرد آلياً حالياً</p>
+                        <div class="status-circle {bot_status_class}">{ "✔️" if stats['bot_running'] else "✖️" }</div>
+                        <h4>{bot_status_text}</h4>
+                        <p style="font-size: 12px; color: #999;">{ "البوت يقوم بالرد آلياً حالياً" if stats['bot_running'] else "البوت متوقف عن الرد حالياً" }</p>
                     </div>
+                    <a href="/toggle_bot" class="btn-toggle {'btn-off' if stats['bot_running'] else ''}">{bot_btn_text}</a>
                 </div>
 
                 <div class="sidebar-card" style="text-align: right;">
-                    <h3>📸 معلومات الحساب</h3>
+                    <h3>📸 معلومات الربط</h3>
                     <div class="info-item">
-                        <span class="info-label">معرف الحساب</span>
-                        <span>{PAGE_ID[:10]}...</span>
+                        <span class="info-label">صفحة فيسبوك</span>
+                        <span>{stats['fb_page_name']}</span>
                     </div>
                     <div class="info-item">
-                        <span class="info-label">آخر نشاط</span>
-                        <span>{stats['last_activity']}</span>
+                        <span class="info-label">حساب انستغرام</span>
+                        <span>@{stats['ig_username']}</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">حالة OpenAI</span>
+                        <span class="status-badge {'status-ok' if '✅' in stats['openai_status'] else 'status-err'}">{stats['openai_status']}</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">حالة Meta API</span>
+                        <span class="status-badge {'status-ok' if '✅' in stats['meta_status'] else 'status-err'}">{stats['meta_status']}</span>
                     </div>
                     <div style="margin-top: 20px; text-align: center;">
                         <img src="https://upload.wikimedia.org/wikipedia/commons/a/a5/Instagram_icon.png" width="20" style="vertical-align: middle;">
-                        <span style="font-size: 12px; color: var(--primary);">متصل بـ Instagram</span>
+                        <span style="font-size: 12px; color: var(--primary);">نظام الفحص الدوري نشط</span>
                     </div>
                 </div>
             </div>
         </div>
 
         <script>
+            // تحديث الصفحة كل 30 ثانية لرؤية النتائج الجديدة
             setTimeout(() => {{ location.reload(); }}, 30000);
         </script>
     </body>
